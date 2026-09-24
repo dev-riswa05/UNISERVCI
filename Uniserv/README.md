@@ -1,16 +1,63 @@
-# React + Vite
+# Gestion des salles de réunion — UNISERV BTP
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Interface React utilisée par le service RH pour consulter le planning et gérer
+les réservations de salles.
 
-Currently, two official plugins are available:
+## Démarrage local
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Prérequis : Node.js, le backend Django et MySQL/WampServer démarrés.
 
-## React Compiler
+```powershell
+cd C:\Users\Hp\Desktop\Uniservci\Uniserv
+npm install
+npm run dev
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+L'interface est ensuite accessible sur <http://localhost:5173>.
 
-## Expanding the ESLint configuration
+## Test depuis le même réseau Wi-Fi
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+L'adresse Wi-Fi actuelle de cet ordinateur est `10.0.0.99`.
+
+Lancer Django en écoutant sur le réseau :
+
+```powershell
+cd C:\Users\Hp\Desktop\Uniservci\backend
+.\.venv\Scripts\Activate.ps1
+python manage.py runserver 0.0.0.0:8000
+```
+
+Dans un second terminal, lancer le frontend :
+
+```powershell
+cd C:\Users\Hp\Desktop\Uniservci\Uniserv
+npm run dev
+```
+
+Les autres personnes connectées au même réseau peuvent ensuite ouvrir :
+
+<http://10.0.0.99:5173>
+
+Si l'adresse IP de l'ordinateur change, remplacer `10.0.0.99` dans
+`backend/.env`. Il peut aussi être nécessaire d'autoriser les ports `5173` et
+`8000` dans le pare-feu Windows lors de la première connexion.
+
+## Architecture importante
+
+- `src/lib/api.js` centralise l'URL de Django, le token et les erreurs HTTP.
+- `src/components/ProtectedRoute.jsx` protège les routes React.
+- `src/pages/ReservationForm.jsx` sert à la création et à la modification.
+- Django reste responsable de la sécurité, des conflits et de l'identité du RH.
+
+## Variables d'environnement
+
+Copier `.env.example` vers `.env` seulement si l'URL de l'API doit changer.
+Les variables commençant par `VITE_` sont intégrées au build frontend et ne
+doivent donc jamais contenir de mot de passe ou de secret.
+
+## Vérifications
+
+```powershell
+npm run lint
+npm run build
+```
