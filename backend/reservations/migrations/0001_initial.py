@@ -28,7 +28,6 @@ class Migration(migrations.Migration):
                 'verbose_name': 'Notification',
                 'verbose_name_plural': 'Notifications',
                 'db_table': 'notifications',
-                'managed': False,
             },
         ),
         migrations.CreateModel(
@@ -43,7 +42,6 @@ class Migration(migrations.Migration):
                 'verbose_name': 'Paramètre',
                 'verbose_name_plural': 'Paramètres',
                 'db_table': 'parametres',
-                'managed': False,
             },
         ),
         migrations.CreateModel(
@@ -57,7 +55,6 @@ class Migration(migrations.Migration):
                 'verbose_name': 'Participant',
                 'verbose_name_plural': 'Participants',
                 'db_table': 'participants',
-                'managed': False,
             },
         ),
         migrations.CreateModel(
@@ -72,7 +69,6 @@ class Migration(migrations.Migration):
                 'verbose_name': 'Rappel',
                 'verbose_name_plural': 'Rappels',
                 'db_table': 'rappels',
-                'managed': False,
             },
         ),
         migrations.CreateModel(
@@ -98,7 +94,6 @@ class Migration(migrations.Migration):
                 'verbose_name': 'Réservation',
                 'verbose_name_plural': 'Réservations',
                 'db_table': 'reservations',
-                'managed': False,
             },
         ),
         migrations.CreateModel(
@@ -117,7 +112,6 @@ class Migration(migrations.Migration):
                 'verbose_name': 'Salle',
                 'verbose_name_plural': 'Salles',
                 'db_table': 'salles',
-                'managed': False,
             },
         ),
         migrations.CreateModel(
@@ -136,7 +130,6 @@ class Migration(migrations.Migration):
                 'verbose_name': 'Utilisateur',
                 'verbose_name_plural': 'Utilisateurs',
                 'db_table': 'utilisateurs',
-                'managed': False,
             },
         ),
         migrations.CreateModel(
@@ -166,9 +159,9 @@ class Migration(migrations.Migration):
                 'db_table': 'session_rh',
             },
         ),
-        # Les modèles métier historiques sont `managed = False`. Les trois
-        # relations ci-dessous complètent uniquement l'état Django ; le SQL
-        # explicite suivant modifie la vraie table MySQL existante.
+        # Les tables métier étaient autrefois créées à la main (MySQL) ; elles
+        # sont maintenant créées par ces migrations. Une base déjà en service
+        # n'est pas concernée : cette migration y est déjà enregistrée.
         migrations.AddField(
             model_name='reservations',
             name='created_by',
@@ -208,34 +201,29 @@ class Migration(migrations.Migration):
                 to='reservations.profilrh',
             ),
         ),
-        migrations.RunSQL(
-            sql="""
-                ALTER TABLE reservations
-                    ADD COLUMN created_by_id BIGINT NULL,
-                    ADD COLUMN created_at DATETIME(6) NULL,
-                    ADD COLUMN updated_by_id BIGINT NULL,
-                    ADD COLUMN updated_at DATETIME(6) NULL,
-                    ADD COLUMN cancelled_by_id BIGINT NULL,
-                    ADD COLUMN cancelled_at DATETIME(6) NULL;
-            """,
-            reverse_sql="""
-                ALTER TABLE reservations
-                    DROP COLUMN cancelled_at,
-                    DROP COLUMN cancelled_by_id,
-                    DROP COLUMN updated_at,
-                    DROP COLUMN updated_by_id,
-                    DROP COLUMN created_at,
-                    DROP COLUMN created_by_id;
-            """,
+        migrations.AddField(
+            model_name='reservations',
+            name='id_salle',
+            field=models.ForeignKey(db_column='id_salle', on_delete=django.db.models.deletion.PROTECT, to='reservations.salles'),
         ),
-        migrations.RunPython(
-            code=lambda apps, schema_editor: [
-                apps.get_model('reservations', 'ProfilRH').objects.get_or_create(
-                    nom=nom,
-                    defaults={'actif': True}
-                )
-                for nom in ('WARIS', 'KARELL', 'REBECCA')
-            ],
-            reverse_code=migrations.RunPython.noop,
+        migrations.AddField(
+            model_name='reservations',
+            name='id_utilisateur',
+            field=models.ForeignKey(db_column='id_utilisateur', on_delete=django.db.models.deletion.PROTECT, to='reservations.utilisateurs'),
+        ),
+        migrations.AddField(
+            model_name='participants',
+            name='id_reservation',
+            field=models.ForeignKey(db_column='id_reservation', on_delete=django.db.models.deletion.CASCADE, to='reservations.reservations'),
+        ),
+        migrations.AddField(
+            model_name='rappels',
+            name='id_reservation',
+            field=models.ForeignKey(db_column='id_reservation', on_delete=django.db.models.deletion.CASCADE, to='reservations.reservations'),
+        ),
+        migrations.AddField(
+            model_name='notifications',
+            name='id_reservation',
+            field=models.ForeignKey(db_column='id_reservation', on_delete=django.db.models.deletion.CASCADE, to='reservations.reservations'),
         ),
     ]

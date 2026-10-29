@@ -22,14 +22,14 @@ def envoyer_email_en_arriere_plan(callback):
 def envoyer_email_acces_rh(user):
     prenom = user.first_name or user.username
     send_mail(
-        subject="Votre accès – Gestion des salles de réunion UNISERV BTP",
+        subject="Votre accès – MaSalle (UNISERV BTP)",
         message=(
             f"Bonjour {prenom},\n\n"
-            "Votre accès à la plateforme de gestion des salles de réunion "
-            "UNISERV BTP a été créé.\n\n"
-            f"Nom d'utilisateur :\n{user.username}\n\n"
+            "Votre accès à MaSalle, la plateforme de gestion des salles de réunion "
+            "UNISERV BTP, a été créé.\n\n"
+            f"Identifiant de connexion :\n{user.email}\n\n"
             f"Lien de connexion :\n{settings.FRONTEND_URL.rstrip('/')}/login\n\n"
-            "Utilisez le mot de passe RH communiqué par l'entreprise pour vous connecter.\n\n"
+            "Connectez-vous avec votre adresse email et le mot de passe communiqué par l'entreprise.\n\n"
             "Cordialement,\n\nService Informatique\nUNISERV BTP"
         ),
         from_email=settings.DEFAULT_FROM_EMAIL,

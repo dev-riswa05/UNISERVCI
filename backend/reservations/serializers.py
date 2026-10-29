@@ -1,4 +1,4 @@
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 
 from django.utils import timezone
 from django.db import transaction
@@ -11,6 +11,8 @@ from .models import (
     Rappels,
 )
 
+from .horaires import FERMETURE, OUVERTURE
+from .permissions import MANAGER_GROUP, est_proprietaire, user_role
 from .emails import (
     envoyer_confirmation_reservation,
     envoyer_modification_reservation,
@@ -29,11 +31,11 @@ class SalleSerializer(serializers.ModelSerializer):
 
 
 class AffichageSalleSerializer(serializers.ModelSerializer):
-    """Version tablette d'une salle, sans champs techniques inutiles."""
+    """Version écran d'une salle, sans champs techniques inutiles."""
 
     class Meta:
         model = Salles
-        fields = ['id_salle', 'nom_salle']
+        fields = ['id_salle', 'nom_salle', 'etage', 'localisation']
 
 
 # ==========================================================
@@ -41,10 +43,41 @@ class AffichageSalleSerializer(serializers.ModelSerializer):
 # ==========================================================
 
 class ParticipantSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(max_length=255)
 
     class Meta:
         model = Participants
         fields = ['nom', 'email']
+
+
+MAX_PARTICIPANTS = 100
+
+
+def reservations_en_conflit(salle, date, debut, fin, exclure=None):
+    """Réservations actives de la salle qui chevauchent le créneau demandé."""
+    conflit = Reservations.objects.filter(
+        id_salle=salle,
+        date_reservation=date,
+        heure_debut__lt=fin,
+        heure_fin__gt=debut,
+    ).exclude(statut='ANNULEE')
+    if exclure is not None:
+        conflit = conflit.exclude(id_reservation=exclure)
+    return conflit
+
+
+def verrouiller_et_verifier(salle, date, debut, fin, exclure=None):
+    """Sérialise les réservations d'une même salle puis revérifie le conflit.
+
+    Le verrou sur la ligne de la salle empêche deux requêtes simultanées de
+    passer toutes deux le contrôle de validate() avant l'insertion.
+    Doit être appelé dans une transaction.
+    """
+    Salles.objects.select_for_update().get(pk=salle.pk)
+    if reservations_en_conflit(salle, date, debut, fin, exclure).exists():
+        raise serializers.ValidationError(
+            "Cette salle est déjà réservée sur ce créneau."
+        )
 
 
 # ==========================================================
@@ -53,9 +86,9 @@ class ParticipantSerializer(serializers.ModelSerializer):
 
 class ReservationSerializer(serializers.ModelSerializer):
 
-    created_by_name = serializers.CharField(source='created_by.nom', read_only=True)
-    updated_by_name = serializers.CharField(source='updated_by.nom', read_only=True)
-    cancelled_by_name = serializers.CharField(source='cancelled_by.nom', read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+    updated_by_name = serializers.SerializerMethodField()
+    cancelled_by_name = serializers.SerializerMethodField()
     notification_status = serializers.SerializerMethodField()
 
     participants = ParticipantSerializer(
@@ -69,8 +102,13 @@ class ReservationSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
+    email_demandeur = serializers.EmailField(max_length=255)
+
     class Meta:
         model = Reservations
+        extra_kwargs = {
+            'nombre_participants': {'min_value': 1},
+        }
 
         fields = [
             'id_reservation',
@@ -97,11 +135,50 @@ class ReservationSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at', 'cancelled_at',
         ]
 
+    def to_representation(self, instance):
+        """Un manager voit ses réservations en détail, celles des autres seulement
+        comme un créneau occupé (sans objet, participants, ni coordonnées)."""
+        # Le rôle est calculé une seule fois par requête (et non par réservation).
+        if not hasattr(self, '_acteur'):
+            user = getattr(self.context.get('request'), 'user', None)
+            self._acteur = (
+                user, user_role(user) if user is not None else None
+            )
+        user, role = self._acteur
+        if role == MANAGER_GROUP and not est_proprietaire(user, instance):
+            return {
+                'id_reservation': instance.id_reservation,
+                'id_salle': instance.id_salle_id,
+                'salle_nom': instance.id_salle.nom_salle,
+                'date_reservation': instance.date_reservation,
+                'heure_debut': instance.heure_debut,
+                'heure_fin': instance.heure_fin,
+                'statut': instance.statut,
+                'objet': 'Réservé',
+                'lecture_seule': True,
+            }
+        data = super().to_representation(instance)
+        data['lecture_seule'] = False
+        return data
+
+    @staticmethod
+    def _nom_profil(profil):
+        # Nom complet de la personne, sinon son email.
+        return (profil.libelle or profil.nom) if profil else None
+
+    def get_created_by_name(self, reservation):
+        return self._nom_profil(reservation.created_by)
+
+    def get_updated_by_name(self, reservation):
+        return self._nom_profil(reservation.updated_by)
+
+    def get_cancelled_by_name(self, reservation):
+        return self._nom_profil(reservation.cancelled_by)
+
     def get_notification_status(self, reservation):
-        from .models import Notifications
-        statuses = list(Notifications.objects.filter(
-            id_reservation=reservation
-        ).values_list('statut', flat=True))
+        # notifications_set est préchargé par les vues de liste (pas de
+        # requête par réservation) ; sinon Django l'interroge à la demande.
+        statuses = [n.statut for n in reservation.notifications_set.all()]
         if not statuses:
             return 'NON_SUIVIE'
         if any(value == 'ECHEC' for value in statuses):
@@ -109,14 +186,6 @@ class ReservationSerializer(serializers.ModelSerializer):
         if all(value == 'ENVOYEE' for value in statuses):
             return 'ENVOYEE'
         return 'EN_ATTENTE'
-
-        # Ces valeurs sont imposées par le serveur. Un client ne doit pas
-        # pouvoir attribuer une réservation à un autre RH ni forcer son statut.
-        read_only_fields = [
-            'id_reservation',
-            'id_utilisateur',
-            'statut', 'created_at', 'updated_at', 'cancelled_at',
-        ]
 
 
     # ======================================================
@@ -180,10 +249,7 @@ class ReservationSerializer(serializers.ModelSerializer):
 
         # Les salles ne peuvent être réservées que pendant les horaires
         # d'ouverture. Les bornes 08h00 et 17h30 sont incluses.
-        ouverture = time(8, 0)
-        fermeture = time(17, 30)
-
-        if debut < ouverture or fin > fermeture:
+        if debut < OUVERTURE or fin > FERMETURE:
             raise serializers.ValidationError(
                 "Le créneau doit être compris entre 08h00 et 17h30."
             )
@@ -195,30 +261,35 @@ class ReservationSerializer(serializers.ModelSerializer):
             )
 
 
-        # Vérification des conflits
-        conflit = Reservations.objects.filter(
-            id_salle=salle,
-            date_reservation=date,
-            heure_debut__lt=fin,
-            heure_fin__gt=debut,
-        ).exclude(
-            statut='ANNULEE'
+        # Interdit de réserver dans le passé (à la création, ou si le créneau
+        # est déplacé ; modifier les notes d'une réunion en cours reste permis).
+        creneau_modifie = (
+            self.instance is None
+            or date != self.instance.date_reservation
+            or debut != self.instance.heure_debut
         )
+        if creneau_modifie:
+            maintenant = timezone.localtime()
+            if date < maintenant.date() or (
+                date == maintenant.date() and debut < maintenant.time()
+            ):
+                raise serializers.ValidationError(
+                    "Le créneau demandé est déjà passé."
+                )
 
+        participants = self.initial_data.get('participants')
+        if isinstance(participants, list) and len(participants) > MAX_PARTICIPANTS:
+            raise serializers.ValidationError({
+                'participants': f"Maximum {MAX_PARTICIPANTS} participants."
+            })
 
-        # En modification, on exclut la réservation actuelle
-        if self.instance:
-
-            conflit = conflit.exclude(
-                id_reservation=self.instance.id_reservation
-            )
-
-
-        if conflit.exists():
+        # Contrôle rapide pour un message clair ; le contrôle définitif,
+        # verrouillé, est refait dans create() / update().
+        exclure = self.instance.id_reservation if self.instance else None
+        if reservations_en_conflit(salle, date, debut, fin, exclure).exists():
             raise serializers.ValidationError(
                 "Cette salle est déjà réservée sur ce créneau."
             )
-
 
         return data
 
@@ -235,6 +306,13 @@ class ReservationSerializer(serializers.ModelSerializer):
             []
         )
 
+
+        verrouiller_et_verifier(
+            validated_data['id_salle'],
+            validated_data['date_reservation'],
+            validated_data['heure_debut'],
+            validated_data['heure_fin'],
+        )
 
         # Création de la réservation
         reservation = Reservations.objects.create(
@@ -314,6 +392,21 @@ class ReservationSerializer(serializers.ModelSerializer):
             None
         )
 
+
+        instance = Reservations.objects.select_for_update().get(
+            pk=instance.pk
+        )
+        if instance.statut == 'ANNULEE':
+            raise serializers.ValidationError(
+                "Une réservation annulée ne peut plus être modifiée."
+            )
+        verrouiller_et_verifier(
+            validated_data.get('id_salle', instance.id_salle),
+            validated_data.get('date_reservation', instance.date_reservation),
+            validated_data.get('heure_debut', instance.heure_debut),
+            validated_data.get('heure_fin', instance.heure_fin),
+            exclure=instance.id_reservation,
+        )
 
         # Mise à jour des informations
         for attribut, valeur in validated_data.items():
@@ -416,7 +509,12 @@ class AffichageReservationSerializer(serializers.ModelSerializer):
         read_only=True
     )
 
-    # Noms lisibles utilisés dans l'historique sans exposer les sessions.
+    # Page publique : l'objet réel d'une réunion peut être confidentiel.
+    objet = serializers.SerializerMethodField()
+
+    def get_objet(self, reservation):
+        return 'Réunion'
+
     class Meta:
         model = Reservations
         fields = [

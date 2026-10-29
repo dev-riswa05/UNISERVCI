@@ -1,4 +1,7 @@
+from datetime import datetime
+
 from django.core.management.base import BaseCommand
+from django.db import transaction
 from django.utils import timezone
 
 from reservations.models import Rappels, Participants
@@ -28,7 +31,26 @@ class Command(BaseCommand):
 
         for rappel in rappels:
 
+            # Réserve le rappel de façon atomique : deux exécutions
+            # simultanées du planificateur ne l'envoient pas deux fois.
+            with transaction.atomic():
+                verrouille = Rappels.objects.select_for_update().get(pk=rappel.pk)
+                if verrouille.statut != 'EN_ATTENTE':
+                    continue
+                verrouille.statut = 'EN_COURS'
+                verrouille.save(update_fields=['statut'])
+            rappel = verrouille
+
             reservation = rappel.id_reservation
+
+            # Inutile de rappeler une réunion déjà terminée.
+            fin_reunion = timezone.make_aware(
+                datetime.combine(reservation.date_reservation, reservation.heure_fin)
+            )
+            if fin_reunion < maintenant:
+                rappel.statut = 'ANNULE'
+                rappel.save(update_fields=['statut'])
+                continue
 
             # Ne pas envoyer si la réservation est annulée
             if reservation.statut == 'ANNULEE':
@@ -73,6 +95,9 @@ class Command(BaseCommand):
 
             except Exception as erreur:
 
+                # Remis en attente : sera retenté tant que la réunion n'est pas finie.
+                rappel.statut = 'EN_ATTENTE'
+                rappel.save(update_fields=['statut'])
                 self.stdout.write(
                     self.style.ERROR(
                         f"Erreur réservation "

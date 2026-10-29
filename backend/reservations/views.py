@@ -1,13 +1,17 @@
 from rest_framework import generics, status
+from rest_framework.authtoken.models import Token
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from django.db import transaction
-from datetime import time
 
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_time
-from django.db.models import Count, Sum
+from django.db.models import Count, Prefetch, Sum
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import AllowAny
+from rest_framework.throttling import AnonRateThrottle
 from django.http import HttpResponse
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -16,6 +20,9 @@ from django.contrib.auth.models import Group
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
 import csv
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     Salles,
@@ -34,34 +41,87 @@ from .serializers import (
     AffichageSalleSerializer,
 )
 
+from .horaires import FERMETURE, OUVERTURE
 from .emails import envoyer_annulation_reservation, envoyer_email_acces_rh, envoyer_email_en_arriere_plan
 from .authentication import request_rh_profile
-from .permissions import IsRH, IsRHOrDisplay, IsSuperAdmin, RH_GROUP, user_role
+from .permissions import (
+    IsRH, IsRHOrManager, IsSuperAdmin, RH_GROUP, ROLES_COMPTES,
+    est_proprietaire, gere_toutes_les_reservations, user_role,
+)
 
 
 def utilisateur_metier_pour(user):
-    """Retourne le compte métier correspondant au compte Django connecté."""
-    if user.email:
-        utilisateur = Utilisateurs.objects.filter(
-            email__iexact=user.email,
-            actif=True
-        ).first()
-        if utilisateur:
-            return utilisateur
-    return Utilisateurs.objects.filter(
-        id_utilisateur=1,
+    """Retourne le compte métier correspondant au compte Django connecté.
+
+    Le compte métier est créé au besoin à partir de l'email du compte Django :
+    une réservation n'est jamais attribuée à un utilisateur arbitraire.
+    """
+    if not user.email:
+        return None
+    utilisateur = Utilisateurs.objects.filter(
+        email__iexact=user.email,
         actif=True
     ).first()
+    if utilisateur:
+        return utilisateur
+    if Utilisateurs.objects.filter(email__iexact=user.email).exists():
+        return None  # compte métier existant mais désactivé
+    return Utilisateurs.objects.create(
+        nom=user.last_name or user.get_username(),
+        prenom=user.first_name,
+        email=user.email,
+        mot_de_passe='!',
+        role=user_role(user),
+        actif=True,
+        date_creation=timezone.now(),
+    )
+
+
+def valeur_booleenne(valeur, champ):
+    """Convertit une valeur JSON/formulaire en booléen, sinon erreur 400."""
+    if isinstance(valeur, bool):
+        return valeur
+    if isinstance(valeur, str) and valeur.lower() in ('true', 'false'):
+        return valeur.lower() == 'true'
+    raise ValidationError({champ: 'Une valeur booléenne est obligatoire.'})
+
+
+FORMULE_DEBUTS = ('=', '+', '-', '@', chr(9), chr(13))
+
+
+def neutraliser_formule(valeur):
+    """Empêche Excel d'exécuter une cellule CSV commençant par une formule."""
+    texte = '' if valeur is None else str(valeur)
+    if texte and texte[0] in FORMULE_DEBUTS:
+        return "'" + texte
+    return texte
+
+
+def revoquer_sessions(user):
+    """Coupe immédiatement tous les accès actifs d'un compte."""
+    Token.objects.filter(user=user).delete()
+    user.jetons_appareil.all().delete()
+    user.sessions_rh.filter(actif=True).update(actif=False)
 
 
 # ==========================================================
-# AFFICHAGE TABLETTE AUTHENTIFIÉ (LECTURE SEULE)
+# VUE ÉCRAN PUBLIQUE (LECTURE SEULE, SANS CONNEXION)
 # ==========================================================
+
+class AffichageThrottle(AnonRateThrottle):
+    scope = 'affichage'
+
 
 class AffichageSallesView(APIView):
-    """Flux minimal destiné aux tablettes, sans donnée personnelle."""
+    """Flux minimal pour les écrans : toutes les salles, sans donnée personnelle.
 
-    permission_classes = [IsRHOrDisplay]
+    Public : aucune authentification. Seuls la salle, l'horaire et un objet
+    générique sont exposés ; jamais de nom, d'email ni de note.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [AffichageThrottle]
 
     def get(self, request):
         date_param = request.query_params.get('date')
@@ -113,7 +173,7 @@ class SalleListCreateView(generics.ListCreateAPIView):
     queryset = Salles.objects.all()
     serializer_class = SalleSerializer
     def get_permissions(self):
-        return [(IsSuperAdmin if self.request.method == 'POST' else IsRH)()]
+        return [(IsSuperAdmin if self.request.method == 'POST' else IsRHOrManager)()]
 
     def perform_create(self, serializer):
         serializer.save(date_creation=timezone.now())
@@ -122,7 +182,7 @@ class SalleListCreateView(generics.ListCreateAPIView):
 
 
 class SallesDisponiblesView(APIView):
-    permission_classes = [IsRH]
+    permission_classes = [IsRHOrManager]
 
     def get(self, request):
 
@@ -177,12 +237,18 @@ class SallesDisponiblesView(APIView):
 
         # En modification, la réservation courante ne doit pas entrer en
         # conflit avec elle-même. Les autres conflits restent bien détectés.
+        if reservation_a_exclure and not reservation_a_exclure.isdigit():
+            return Response(
+                {"erreur": "L'identifiant de réservation est invalide."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         if reservation_a_exclure:
             reservations_en_conflit = reservations_en_conflit.exclude(
                 id_reservation=reservation_a_exclure
             )
 
-        if debut_valide < time(8, 0) or fin_valide > time(17, 30):
+        if debut_valide < OUVERTURE or fin_valide > FERMETURE:
             return Response(
                 {
                     "erreur": (
@@ -218,12 +284,47 @@ class SallesDisponiblesView(APIView):
 # LISTE ET CREATION DES RESERVATIONS
 # ==========================================================
 
-class ReservationListCreateView(generics.ListCreateAPIView):
-    queryset = Reservations.objects.select_related(
+def verifier_acces_reservation(user, reservation):
+    """Un manager n'agit que sur ses propres réservations (RH/Super Admin : toutes)."""
+    if not gere_toutes_les_reservations(user) and not est_proprietaire(user, reservation):
+        raise PermissionDenied("Vous ne pouvez agir que sur vos propres réservations.")
+
+
+def reservations_detaillees():
+    """Réservations avec leurs relations préchargées (évite le N+1)."""
+    return Reservations.objects.select_related(
         'id_salle', 'created_by', 'updated_by', 'cancelled_by'
-    ).all()
+    ).prefetch_related(
+        'participants_set',
+        Prefetch(
+            'notifications_set',
+            queryset=Notifications.objects.only('id_notification', 'id_reservation', 'statut'),
+        ),
+    )
+
+
+class PaginationFacultative(PageNumberPagination):
+    """Paginée seulement si le client envoie `page` ou `page_size`.
+
+    Sans ces paramètres la réponse reste une simple liste : l'application
+    actuelle continue de fonctionner, et les gros volumes peuvent être
+    récupérés page par page (`?page=1&page_size=50`).
+    """
+    page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 500
+
+    def paginate_queryset(self, queryset, request, view=None):
+        if 'page' not in request.query_params and 'page_size' not in request.query_params:
+            return None
+        return super().paginate_queryset(queryset, request, view)
+
+
+class ReservationListCreateView(generics.ListCreateAPIView):
+    queryset = reservations_detaillees().order_by('id_reservation')
+    pagination_class = PaginationFacultative
     serializer_class = ReservationSerializer
-    permission_classes = [IsRH]
+    permission_classes = [IsRHOrManager]
 
     def perform_create(self, serializer):
         """Associe la réservation au RH côté serveur, jamais côté React."""
@@ -249,14 +350,17 @@ class ReservationListCreateView(generics.ListCreateAPIView):
 # ==========================================================
 
 class ReservationDetailView(generics.RetrieveUpdateAPIView):
-    queryset = Reservations.objects.select_related(
-        'id_salle', 'created_by', 'updated_by', 'cancelled_by'
-    ).all()
+    queryset = reservations_detaillees()
     serializer_class = ReservationSerializer
-    permission_classes = [IsRH]
+    permission_classes = [IsRHOrManager]
 
     lookup_field = 'id_reservation'
     lookup_url_kwarg = 'pk'
+
+    def get_object(self):
+        reservation = super().get_object()
+        verifier_acces_reservation(self.request.user, reservation)
+        return reservation
 
     def perform_update(self, serializer):
         # Une annulation constitue l'état final dans la V1. Cela protège
@@ -276,7 +380,7 @@ class ReservationDetailView(generics.RetrieveUpdateAPIView):
 # ==========================================================
 
 class AnnulerReservationView(APIView):
-    permission_classes = [IsRH]
+    permission_classes = [IsRHOrManager]
 
     def post(self, request, pk):
 
@@ -293,6 +397,8 @@ class AnnulerReservationView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
+        verifier_acces_reservation(request.user, reservation)
+
         if reservation.statut == "ANNULEE":
             return Response(
                 {
@@ -304,6 +410,15 @@ class AnnulerReservationView(APIView):
         # La réservation et son rappel changent d'état dans la même
         # transaction : ils ne peuvent donc jamais se contredire.
         with transaction.atomic():
+            # Verrou : deux annulations simultanées n'envoient qu'un seul e-mail.
+            reservation = Reservations.objects.select_for_update().select_related(
+                'id_salle'
+            ).get(id_reservation=pk)
+            if reservation.statut == "ANNULEE":
+                return Response(
+                    {"message": "Cette réservation est déjà annulée."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             reservation.statut = "ANNULEE"
             reservation.cancelled_by = request_rh_profile(request)
             reservation.cancelled_at = timezone.now()
@@ -328,8 +443,6 @@ class AnnulerReservationView(APIView):
             participants_a_prevenir = list(
                 Participants.objects.filter(id_participant__in=participant_ids)
             )
-            # Charge la salle maintenant pour éviter une requête DB dans le thread.
-            reservation.id_salle.nom_salle
             transaction.on_commit(
                 lambda: envoyer_email_en_arriere_plan(
                     lambda: envoyer_annulation_reservation(
@@ -354,7 +467,7 @@ class AnnulerReservationView(APIView):
 # ==========================================================
 
 class PlanningReservationsView(APIView):
-    permission_classes = [IsRH]
+    permission_classes = [IsRHOrManager]
 
     def get(self, request):
 
@@ -368,7 +481,7 @@ class PlanningReservationsView(APIView):
                 'id_salle': "L'identifiant de salle est invalide."
             })
 
-        reservations = Reservations.objects.exclude(
+        reservations = reservations_detaillees().exclude(
             statut='ANNULEE'
         )
 
@@ -389,7 +502,8 @@ class PlanningReservationsView(APIView):
 
         serializer = ReservationSerializer(
             reservations,
-            many=True
+            many=True,
+            context={'request': request}
         )
 
         return Response(
@@ -461,20 +575,21 @@ class SalleDetailView(generics.RetrieveUpdateAPIView):
     queryset = Salles.objects.all()
     serializer_class = SalleSerializer
     def get_permissions(self):
-        return [(IsSuperAdmin if self.request.method in ('PUT', 'PATCH') else IsRH)()]
+        return [(IsSuperAdmin if self.request.method in ('PUT', 'PATCH') else IsRHOrManager)()]
     lookup_field = 'id_salle'
     lookup_url_kwarg = 'pk'
 
 
 class DupliquerReservationView(APIView):
-    permission_classes = [IsRH]
+    permission_classes = [IsRHOrManager]
 
     def post(self, request, pk):
         try:
-            source = Reservations.objects.get(pk=pk)
+            source = reservations_detaillees().get(pk=pk)
         except Reservations.DoesNotExist:
             return Response({'erreur': 'Réservation introuvable.'}, status=404)
-        data = ReservationSerializer(source).data
+        verifier_acces_reservation(request.user, source)
+        data = ReservationSerializer(source, context={'request': request}).data
         for key in ('id_reservation', 'statut', 'created_by_name', 'created_at', 'updated_by_name', 'updated_at', 'cancelled_by_name', 'cancelled_at'):
             data.pop(key, None)
         data['date_reservation'] = request.data.get('date_reservation', data['date_reservation'])
@@ -488,7 +603,7 @@ class DupliquerReservationView(APIView):
                 )
             })
         duplicate = serializer.save(id_utilisateur=utilisateur, statut='CONFIRMEE', created_by=request_rh_profile(request), created_at=timezone.now())
-        return Response(ReservationSerializer(duplicate).data, status=201)
+        return Response(ReservationSerializer(duplicate, context={'request': request}).data, status=201)
 
 
 class ExportReservationsView(APIView):
@@ -500,8 +615,9 @@ class ExportReservationsView(APIView):
         response.write('\ufeff')
         writer = csv.writer(response, delimiter=';')
         writer.writerow(['Date', 'Début', 'Fin', 'Salle', 'Objet', 'Demandeur', 'Statut', 'Créée par'])
-        for item in Reservations.objects.select_related('id_salle', 'created_by').order_by('-date_reservation', '-heure_debut'):
-            writer.writerow([item.date_reservation, item.heure_debut, item.heure_fin, item.id_salle.nom_salle, item.objet, item.nom_demandeur, item.statut, item.created_by.nom if item.created_by else ''])
+        reservations = Reservations.objects.select_related('id_salle', 'created_by').order_by('-date_reservation', '-heure_debut')
+        for item in reservations.iterator(chunk_size=500):
+            writer.writerow([item.date_reservation, item.heure_debut, item.heure_fin, neutraliser_formule(item.id_salle.nom_salle), neutraliser_formule(item.objet), neutraliser_formule(item.nom_demandeur), item.statut, neutraliser_formule(item.created_by.nom if item.created_by else '')])
         return response
 
 
@@ -517,14 +633,21 @@ class RHUserListCreateView(APIView):
     permission_classes = [IsSuperAdmin]
 
     def get(self, request):
-        users = get_user_model().objects.filter(groups__name=RH_GROUP).order_by('username')
+        users = get_user_model().objects.filter(
+            groups__name__in=ROLES_COMPTES
+        ).distinct().order_by('email', 'username')
         return Response([serialize_rh_user(user) for user in users])
 
     def post(self, request):
-        username = (request.data.get('username') or '').strip()
         email = (request.data.get('email') or '').strip().lower()
-        if not username or not email:
-            raise ValidationError({'erreur': "Le nom d'utilisateur et l'email sont obligatoires."})
+        # L'email est l'identifiant de connexion ; le nom d'utilisateur Django
+        # n'est qu'un identifiant interne et reprend l'email par défaut.
+        username = (request.data.get('username') or '').strip() or email
+        if not email:
+            raise ValidationError({'email': "L'adresse email est obligatoire."})
+        role = (request.data.get('role') or RH_GROUP).upper()
+        if role not in ROLES_COMPTES:
+            raise ValidationError({'role': "Rôle invalide : choisissez RH ou MANAGER."})
         try:
             validate_email(email)
         except DjangoValidationError:
@@ -544,19 +667,20 @@ class RHUserListCreateView(APIView):
         user = model(username=username, email=email,
                      first_name=(request.data.get('prenom') or '').strip(),
                      last_name=(request.data.get('nom') or '').strip(),
-                     is_active=request.data.get('actif', True))
+                     is_active=valeur_booleenne(request.data.get('actif', True), 'actif'))
         user.set_password(password); user.save()
-        user.groups.add(Group.objects.get_or_create(name=RH_GROUP)[0])
+        user.groups.add(Group.objects.get_or_create(name=role)[0])
         Utilisateurs.objects.get_or_create(
             email=email,
             defaults={'nom': user.last_name or username, 'prenom': user.first_name,
-                      'mot_de_passe': '!', 'role': RH_GROUP,
+                      'mot_de_passe': '!', 'role': role,
                       'actif': user.is_active, 'date_creation': timezone.now()}
         )
         email_sent = True
         try:
             envoyer_email_acces_rh(user)
         except Exception:
+            logger.exception("Envoi de l'email d'accès RH impossible.")
             email_sent = False
         message = ('Compte créé avec succès.' if email_sent else
                    "Compte créé avec succès, mais l'email d'accès n'a pas pu être envoyé.")
@@ -568,7 +692,7 @@ class RHUserDetailView(APIView):
 
     def _get(self, pk):
         try:
-            return get_user_model().objects.get(pk=pk, groups__name=RH_GROUP)
+            return get_user_model().objects.get(pk=pk, groups__name__in=ROLES_COMPTES)
         except get_user_model().DoesNotExist:
             raise ValidationError({'id': 'Membre RH introuvable.'})
 
@@ -577,6 +701,7 @@ class RHUserDetailView(APIView):
 
     def patch(self, request, pk):
         user = self._get(pk)
+        role_change = False
         for field, source in [('first_name', 'prenom'), ('last_name', 'nom')]:
             if source in request.data:
                 setattr(user, field, (request.data[source] or '').strip())
@@ -590,20 +715,31 @@ class RHUserDetailView(APIView):
             if get_user_model().objects.exclude(pk=pk).filter(email__iexact=value).exists():
                 raise ValidationError({'email': "Cette adresse email est déjà utilisée."})
             user.email = value
+        if 'role' in request.data:
+            nouveau_role = str(request.data['role']).upper()
+            if nouveau_role not in ROLES_COMPTES:
+                raise ValidationError({'role': "Rôle invalide : choisissez RH ou MANAGER."})
+            if user_role(user) != nouveau_role:
+                user.groups.remove(*Group.objects.filter(name__in=ROLES_COMPTES))
+                user.groups.add(Group.objects.get_or_create(name=nouveau_role)[0])
+                role_change = True
         if 'actif' in request.data:
-            user.is_active = bool(request.data['actif'])
+            user.is_active = valeur_booleenne(request.data['actif'], 'actif')
         if request.data.get('password'):
             try:
                 validate_password(request.data['password'], user)
             except DjangoValidationError as exc:
                 raise ValidationError({'password': list(exc.messages)})
             user.set_password(request.data['password'])
+            mot_de_passe_change = True
+        else:
+            mot_de_passe_change = False
         user.save()
         Utilisateurs.objects.filter(email__iexact=user.email).update(
             nom=user.last_name or user.username, prenom=user.first_name,
-            actif=user.is_active, role=RH_GROUP)
-        if not user.is_active:
-            user.auth_token.delete() if hasattr(user, 'auth_token') else None
+            actif=user.is_active, role=user_role(user))
+        if not user.is_active or mot_de_passe_change or role_change:
+            revoquer_sessions(user)
         return Response(serialize_rh_user(user))
 
     def delete(self, request, pk):
@@ -611,6 +747,7 @@ class RHUserDetailView(APIView):
         email = user.email
         with transaction.atomic():
             # Préserve l'historique des réservations dans la table métier.
+            revoquer_sessions(user)
             user.delete()
             if email:
                 Utilisateurs.objects.filter(email__iexact=email).update(actif=False)
@@ -621,10 +758,11 @@ class RHUserResendAccessView(APIView):
     permission_classes = [IsSuperAdmin]
     def post(self, request, pk):
         try:
-            user = get_user_model().objects.get(pk=pk, groups__name=RH_GROUP)
+            user = get_user_model().objects.get(pk=pk, groups__name__in=ROLES_COMPTES)
             envoyer_email_acces_rh(user)
         except get_user_model().DoesNotExist:
             raise ValidationError({'id': 'Membre RH introuvable.'})
         except Exception:
+            logger.exception("Renvoi de l'email d'accès RH impossible.")
             return Response({'erreur': "L'email d'accès n'a pas pu être envoyé."}, status=503)
         return Response({'message': "Email d'accès envoyé."})

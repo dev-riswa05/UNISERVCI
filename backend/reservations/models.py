@@ -32,7 +32,10 @@ class ProfilUtilisateur(models.Model):
 
 
 class ProfilRH(models.Model):
+    # Clé de traçabilité d'une personne : son email en minuscules.
     nom = models.CharField(max_length=100, unique=True)
+    # Nom affiché dans l'historique (nom complet, sinon l'email).
+    libelle = models.CharField(max_length=150, blank=True, default='')
     actif = models.BooleanField(default=True)
     date_creation = models.DateTimeField(auto_now_add=True)
 
@@ -72,6 +75,29 @@ class SessionRH(models.Model):
         return f"{self.utilisateur} — {self.profil}"
 
 
+class JetonAppareil(models.Model):
+    """Jeton d'API propre à une connexion : un par appareil et par login."""
+    key = models.CharField(
+        primary_key=True,
+        max_length=40,
+        default=generate_session_key,
+        editable=False
+    )
+    utilisateur = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='jetons_appareil'
+    )
+    date_creation = models.DateTimeField(auto_now_add=True)
+    derniere_activite = models.DateTimeField()
+
+    class Meta:
+        db_table = 'jeton_appareil'
+
+    def __str__(self):
+        return f"Jeton de {self.utilisateur}"
+
+
 class Utilisateurs(models.Model):
     id_utilisateur = models.AutoField(primary_key=True)
     nom = models.CharField(max_length=100)
@@ -83,7 +109,6 @@ class Utilisateurs(models.Model):
     date_creation = models.DateTimeField(blank=True, null=True)
 
     class Meta:
-        managed = False
         db_table = 'utilisateurs'
         verbose_name = "Utilisateur"
         verbose_name_plural = "Utilisateurs"
@@ -103,7 +128,6 @@ class Salles(models.Model):
     date_creation = models.DateTimeField(blank=True, null=True)
 
     class Meta:
-        managed = False
         db_table = 'salles'
         verbose_name = "Salle"
         verbose_name_plural = "Salles"
@@ -172,7 +196,6 @@ class Reservations(models.Model):
     cancelled_at = models.DateTimeField(blank=True, null=True)
 
     class Meta:
-        managed = False
         db_table = 'reservations'
         verbose_name = "Réservation"
         verbose_name_plural = "Réservations"
@@ -194,7 +217,6 @@ class Participants(models.Model):
     email = models.CharField(max_length=150)
 
     class Meta:
-        managed = False
         db_table = 'participants'
         verbose_name = "Participant"
         verbose_name_plural = "Participants"
@@ -217,7 +239,6 @@ class Rappels(models.Model):
     date_heure_envoi = models.DateTimeField(blank=True, null=True)
 
     class Meta:
-        managed = False
         db_table = 'rappels'
         verbose_name = "Rappel"
         verbose_name_plural = "Rappels"
@@ -243,7 +264,6 @@ class Notifications(models.Model):
     message_erreur = models.TextField(blank=True, null=True)
 
     class Meta:
-        managed = False
         db_table = 'notifications'
         verbose_name = "Notification"
         verbose_name_plural = "Notifications"
@@ -259,7 +279,6 @@ class Parametres(models.Model):
     description = models.TextField(blank=True, null=True)
 
     class Meta:
-        managed = False
         db_table = 'parametres'
         verbose_name = "Paramètre"
         verbose_name_plural = "Paramètres"
