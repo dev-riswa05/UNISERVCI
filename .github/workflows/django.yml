@@ -1,4 +1,4 @@
-name: Django CI
+name: CI
 
 on:
   push:
@@ -7,24 +7,55 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
-
+  backend:
     runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 4
-      matrix:
-        python-version: [3.7, 3.8, 3.9]
-
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DJANGO_DEBUG: "True"
+      POSTGRES_DB: gestion_salles
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_HOST: 127.0.0.1
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
     - uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
+    - uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install Dependencies
+        python-version: "3.13"
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-    - name: Run Tests
-      run: |
-        python manage.py test
+    - name: Django check
+      run: python manage.py check
+    - name: Tests
+      run: python manage.py test
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Uniserv
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - run: npm install
+    - run: npm run lint
+    - run: npm run build
+      env:
+        VITE_API_URL: https://example.invalid/api

@@ -21,7 +21,9 @@ cd C:\Users\Hp\Desktop\Uniservci\Uniserv
 npm run dev
 ```
 
-4. Ouvrir <http://localhost:5173> et se connecter avec le compte RH.
+4. Ouvrir <http://localhost:5173>. La page d'accueil propose deux boutons :
+   **Se connecter** (email + mot de passe, la redirection se fait selon le profil)
+   et **Écran** (vue publique de toutes les salles, sans connexion).
 
 ## Parcours d'une réservation
 
@@ -42,34 +44,55 @@ Avant la production, définir au minimum une nouvelle `DJANGO_SECRET_KEY`,
 passer `DJANGO_DEBUG=False`, renseigner `DJANGO_ALLOWED_HOSTS` et configurer le
 backend SMTP.
 
-## Vérification automatique de la V1
+## Docker et déploiement
 
-Lorsque WampServer est démarré, cette commande teste les principaux parcours
-sans conserver de données techniques dans MySQL :
+```powershell
+copy .env.docker.example .env      # renseigner POSTGRES_PASSWORD et DJANGO_SECRET_KEY
+docker compose up -d --build       # site sur http://localhost:8088
+```
+
+Le guide complet (variables, migrations, sondes Kubernetes, rappels, GitLab CI, synthèse de
+l'audit de sécurité) est dans [docs/deploiement.md](docs/deploiement.md).
+
+## Tests automatiques
 
 ```powershell
 cd C:\Users\Hp\Desktop\Uniservci\backend
-python manage.py verifier_v1
+python manage.py test                                   # base configurée dans .env (PostgreSQL)
+python manage.py test --settings=config.settings_test  # SQLite en mémoire, sans serveur
 ```
 
-## Compte technique des tablettes
+## Profils et comptes
 
-Créer ou renouveler le compte en saisissant son mot de passe de manière
-masquée dans le terminal :
+| Profil | Accès |
+|---|---|
+| **Super Admin** | Tout, y compris les salles et les comptes (page Administration) |
+| **RH** | Toutes les réservations, le planning, le tableau de bord, l'export |
+| **Manager** | Crée des réservations, modifie ou annule les siennes. Voit l'occupation de toutes les salles, mais le détail seulement de ses propres réservations. |
+
+La connexion se fait par **adresse email** (insensible à la casse) et mot de
+passe. Le profil est lu côté serveur : l'utilisateur n'a pas à le choisir.
+L'historique « créée par / modifiée par / annulée par » est rattaché à la
+personne (nom complet, sinon email).
+
+Créer ou mettre à jour un compte en ligne de commande (mot de passe saisi de
+façon masquée, ou variable `COMPTE_PASSWORD`) :
 
 ```powershell
 cd C:\Users\Hp\Desktop\Uniservci\backend
-python manage.py configurer_affichage
+python manage.py configurer_roles
+python manage.py creer_compte --email prenom.nom@exemple.com --role SUPER_ADMIN
 ```
 
-Le compte `affichage_salles` appartient au groupe Django `AFFICHAGE`. Il peut
-uniquement consulter `/api/affichage/`; toutes les opérations RH lui sont
-refusées par Django. Après une première connexion sur chaque tablette, son
-token reste dans le stockage local du navigateur et la session est persistante.
+Les rôles possibles sont `SUPER_ADMIN`, `RH` et `MANAGER`. Une fois connecté, le
+Super Admin crée les comptes RH et Manager depuis la page Administration.
 
-Les futurs comptes RH doivent être administrateurs Django ou membres du groupe
-`RH`. Un compte Django sans l'un de ces deux profils n'obtient aucun accès à
-l'application.
+## Vue écran publique
+
+`/affichage` est publique, en lecture seule, et affiche toutes les salles du
+jour (salle, horaire, libre ou occupé). Elle n'expose ni nom, ni email, ni note,
+et l'objet des réunions est remplacé par « Réunion ». Le nombre de requêtes par
+adresse est limité (`API_AFFICHAGE_RATE`).
 
 ## Checklist avant mise en production
 
@@ -78,8 +101,8 @@ l'application.
 - renseigner le serveur SMTP et lancer `envoyer_rappels` toutes les minutes ;
 - sauvegarder quotidiennement MySQL et tester régulièrement la restauration ;
 - régler `RH_SESSION_MAX_AGE` et `API_LOGIN_RATE` selon la politique interne ;
-- exécuter `python manage.py check`, `python manage.py verifier_v1`,
+- exécuter `python manage.py check`, `python manage.py test`,
   `npm run lint` et `npm run build` avant chaque déploiement.
 
-L'administration fonctionnelle est disponible dans `/administration`. Le
-compte technique d'affichage reste strictement limité à `/affichage`.
+L'administration fonctionnelle est disponible dans `/administration`
+(Super Admin uniquement).

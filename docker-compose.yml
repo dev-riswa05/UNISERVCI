@@ -1,0 +1,81 @@
+# MaSalle : base de données + application + site web + rappels.
+#   docker compose up -d --build        démarrer
+#   docker compose logs -f backend      suivre les journaux
+#   docker compose down                 arrêter (les données restent)
+name: masalle
+
+services:
+  # Base de données PostgreSQL. Aucun port publié : seule l'application y accède.
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gestion_salles}
+      POSTGRES_USER: ${POSTGRES_USER:-masalle}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Renseignez POSTGRES_PASSWORD dans le fichier .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Application Django (gunicorn). Applique les migrations au démarrage.
+  backend:
+    build: ./backend
+    image: masalle-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      RUN_MIGRATIONS: "1"
+      DJANGO_DEBUG: "False"
+      DJANGO_SERVE_MEDIA: "True"
+      # nginx est le seul proxy devant l'application : une adresse X-Forwarded-For à lire.
+      API_NUM_PROXIES: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - media_data:/app/media
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/api/ready/', timeout=4)"
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
+
+  # Rappels 2 h avant chaque réunion : remplace la tâche planifiée Windows.
+  rappels:
+    image: masalle-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      DJANGO_DEBUG: "False"
+    command: ["sh", "-c", "while true; do python manage.py envoyer_rappels; sleep 60; done"]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Site web (nginx) : sert l'application React et relaie /api vers Django.
+  web:
+    build:
+      context: ./Uniserv
+      args:
+        VITE_API_URL: /api
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8088}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  media_data:
