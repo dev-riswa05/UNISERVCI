@@ -12,8 +12,11 @@ const emptyMember = {
   username: "",
   email: "",
   password: "",
+  role: "RH",
   actif: true,
 };
+
+const ROLE_LABELS = { RH: "Équipe RH", MANAGER: "Manager" };
 const emptyRoom = {
   nom_salle: "",
   localisation: "",
@@ -86,6 +89,20 @@ export default function Administration() {
     }
   };
 
+  // Change le rôle d'un compte (Équipe RH ou Manager).
+  const changeRole = async (user, role) => {
+    try {
+      await apiFetch(`/administration/utilisateurs-rh/${user.id}/`, {
+        method: "PATCH",
+        body: JSON.stringify({ role }),
+      });
+      setMessage(`Le rôle de ${user.email} est maintenant « ${ROLE_LABELS[role]} ».`);
+      load();
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  };
+
   // Demande au backend de renvoyer les informations d'accès par e-mail.
   const resend = async (user) => {
     try {
@@ -105,7 +122,7 @@ export default function Administration() {
       `${user.prenom || ""} ${user.nom || ""}`.trim() || user.username;
     if (
       !window.confirm(
-        `Supprimer définitivement le compte RH de ${displayName} ?\n\nCette personne ne pourra plus se connecter.`,
+        `Supprimer définitivement le compte de ${displayName} ?\n\nCette personne ne pourra plus se connecter.`,
       )
     )
       return;
@@ -114,7 +131,7 @@ export default function Administration() {
       await apiFetch(`/administration/utilisateurs-rh/${user.id}/`, {
         method: "DELETE",
       });
-      setMessage(`Le compte RH de ${displayName} a été supprimé.`);
+      setMessage(`Le compte de ${displayName} a été supprimé.`);
       await load();
     } catch (requestError) {
       setError(requestError.message);
@@ -198,7 +215,7 @@ export default function Administration() {
     <>
       <PageHeader
         title="Administration"
-        description="Gestion autonome des membres RH et des salles."
+        description="Gestion autonome des comptes (RH et managers) et des salles."
       />
       {error && <Alert onClose={() => setError("")}>{error}</Alert>}
       {message && <Alert onClose={() => setMessage("")}>{message}</Alert>}
@@ -212,6 +229,7 @@ export default function Administration() {
             setMember={setMember}
             addMember={addMember}
             toggleMember={toggleMember}
+            changeRole={changeRole}
             resend={resend}
             deleteMember={deleteMember}
           />
@@ -238,22 +256,23 @@ export default function Administration() {
   );
 }
 
-// Section responsable de la création et de la liste des comptes RH.
+// Section responsable de la création et de la liste des comptes RH et managers.
 function MembersSection({
   users,
   member,
   setMember,
   addMember,
   toggleMember,
+  changeRole,
   resend,
   deleteMember,
 }) {
   return (
     <section className="card p-5">
-      <h2 className="mb-4 text-xl font-black">Gestion équipe RH</h2>
+      <h2 className="mb-4 text-xl font-black">Gestion des comptes</h2>
       <form
         onSubmit={addMember}
-        className="mb-6 grid gap-3 md:grid-cols-2 xl:grid-cols-6"
+        className="mb-6 grid gap-3 md:grid-cols-2 xl:grid-cols-4"
       >
         <input
           className="field"
@@ -267,13 +286,6 @@ function MembersSection({
           placeholder="Prénom"
           value={member.prenom}
           onChange={(e) => setMember({ ...member, prenom: e.target.value })}
-        />
-        <input
-          className="field"
-          placeholder="Utilisateur"
-          required
-          value={member.username}
-          onChange={(e) => setMember({ ...member, username: e.target.value })}
         />
         <input
           className="field"
@@ -293,21 +305,47 @@ function MembersSection({
           value={member.password}
           onChange={(e) => setMember({ ...member, password: e.target.value })}
         />
-        <button className="btn-primary">
+        <select
+          className="field"
+          aria-label="Rôle"
+          value={member.role}
+          onChange={(e) => setMember({ ...member, role: e.target.value })}
+        >
+          <option value="RH">Équipe RH</option>
+          <option value="MANAGER">Manager</option>
+        </select>
+        <button className="btn-primary justify-self-start md:col-span-2 xl:col-span-4">
           <Plus size={16} />
           Ajouter
         </button>
       </form>
       <p className="mb-5 text-xs text-slate-500">
-        Le mot de passe est défini par le Super Admin, chiffré par Django et
-        n’est jamais retourné par l’API.
+        L’adresse email sert d’identifiant de connexion. Le mot de passe que vous
+        définissez ici n’est plus jamais affiché ensuite.
       </p>
-      <div className="overflow-x-auto">
+      {/* Cartes empilées sur téléphone, tableau à partir de md. */}
+      <div className="space-y-3 md:hidden">
+        {users.map((user) => (
+          <div key={user.id} className="rounded-xl border p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <b className="min-w-0 wrap-break-word">
+                {user.prenom} {user.nom}
+              </b>
+              <StatusBadge user={user} />
+            </div>
+            <p className="mt-1 break-all text-xs text-slate-500">
+              {user.email}
+            </p>
+            <RoleSelect user={user} changeRole={changeRole} />
+            <MemberActions user={user} toggleMember={toggleMember} resend={resend} deleteMember={deleteMember} />
+          </div>
+        ))}
+      </div>
+      <div className="hidden overflow-x-auto md:block">
         <table className="w-full text-left text-sm">
           <thead>
             <tr>
               <th>Nom</th>
-              <th>Utilisateur</th>
               <th>Email</th>
               <th>Rôle</th>
               <th>Statut</th>
@@ -320,34 +358,15 @@ function MembersSection({
                 <td className="py-3">
                   {user.prenom} {user.nom}
                 </td>
-                <td>{user.username}</td>
                 <td>{user.email}</td>
-                <td>{user.role}</td>
-                <td>{user.actif ? "ACTIF" : "INACTIF"}</td>
-                <td className="flex flex-wrap gap-2 py-2">
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    onClick={() => toggleMember(user)}
-                  >
-                    {user.actif ? "Désactiver" : "Activer"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    title="Renvoyer l’email"
-                    onClick={() => resend(user)}
-                  >
-                    <Mail size={16} />
-                  </button>
-                  <button
-                    type="button"
-                    className="inline-flex items-center gap-2 rounded-xl border border-red-200 px-3 py-2 font-bold text-red-600 transition hover:bg-red-50"
-                    onClick={() => deleteMember(user)}
-                  >
-                    <Trash2 size={16} />
-                    Supprimer
-                  </button>
+                <td>
+                  <RoleSelect user={user} changeRole={changeRole} />
+                </td>
+                <td>
+                  <StatusBadge user={user} />
+                </td>
+                <td className="py-2">
+                  <MemberActions user={user} toggleMember={toggleMember} resend={resend} deleteMember={deleteMember} />
                 </td>
               </tr>
             ))}
@@ -355,6 +374,55 @@ function MembersSection({
         </table>
       </div>
     </section>
+  );
+}
+
+// Badge de statut du compte.
+function StatusBadge({ user }) {
+  return (
+    <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${user.actif ? "bg-slate-900 text-white" : "bg-slate-200 text-slate-500"}`}>
+      {user.actif ? "ACTIF" : "INACTIF"}
+    </span>
+  );
+}
+
+// Le rôle est affiché en badge et modifiable directement dans la liste.
+function RoleSelect({ user, changeRole }) {
+  return (
+    <label className="mt-2 flex items-center gap-2 md:mt-0">
+      <span className="role-badge">{ROLE_LABELS[user.role] || user.role}</span>
+      <select
+        className="field min-h-10 py-1 text-sm"
+        aria-label={`Rôle de ${user.email}`}
+        value={user.role}
+        onChange={(e) => changeRole(user, e.target.value)}
+      >
+        <option value="RH">Équipe RH</option>
+        <option value="MANAGER">Manager</option>
+      </select>
+    </label>
+  );
+}
+
+// Boutons d'action d'un compte, partagés entre le tableau et les cartes.
+function MemberActions({ user, toggleMember, resend, deleteMember }) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-2 md:mt-0">
+      <button type="button" className="btn-secondary" onClick={() => toggleMember(user)}>
+        {user.actif ? "Désactiver" : "Activer"}
+      </button>
+      <button type="button" className="btn-secondary" title="Renvoyer l’email" aria-label="Renvoyer l’email" onClick={() => resend(user)}>
+        <Mail size={16} />
+      </button>
+      <button
+        type="button"
+        className="inline-flex items-center gap-2 rounded-xl border border-red-200 px-3 py-2 font-bold text-red-600 transition hover:bg-red-50"
+        onClick={() => deleteMember(user)}
+      >
+        <Trash2 size={16} />
+        Supprimer
+      </button>
+    </div>
   );
 }
 
@@ -402,15 +470,15 @@ function RoomsSection({ rooms, room, setRoom, addRoom, editRoom, toggleRoom }) {
             key={item.id_salle}
             className="flex flex-col justify-between gap-3 py-4 sm:flex-row sm:items-center"
           >
-            <div>
-              <b>{item.nom_salle}</b>
+            <div className="min-w-0">
+              <b className="wrap-break-word">{item.nom_salle}</b>
               <p className="text-xs text-slate-500">
                 {item.localisation || "Localisation non renseignée"} ·{" "}
                 {item.etage || "Étage non renseigné"} · {item.capacite || 0}{" "}
                 places
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button className="btn-secondary" onClick={() => editRoom(item)}>
                 <Edit3 size={16} />
                 Modifier
@@ -440,7 +508,7 @@ function RoomEditor({ room, setRoom, onClose, onSave, saving }) {
       <form
         onSubmit={onSave}
         onMouseDown={(e) => e.stopPropagation()}
-        className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl"
+        className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-4 shadow-2xl sm:p-6"
       >
         <div className="mb-6 flex items-start justify-between">
           <div>
@@ -509,7 +577,7 @@ function RoomEditor({ room, setRoom, onClose, onSave, saving }) {
             </span>
           </label>
         </div>
-        <div className="mt-7 flex justify-end gap-3">
+        <div className="mt-7 flex flex-wrap justify-end gap-3">
           <button type="button" className="btn-secondary" onClick={onClose}>
             Annuler
           </button>

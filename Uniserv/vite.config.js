@@ -4,10 +4,9 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [tailwindcss()],
 
-  // Écoute sur toutes les interfaces réseau de l'ordinateur.
-  // Le site reste accessible en local et devient aussi accessible via l'IP Wi-Fi.
+  // Accessible uniquement depuis cet ordinateur (localhost).
   server: {
-    host: "0.0.0.0",
+    host: "localhost",
     port: 5173,
   },
 })

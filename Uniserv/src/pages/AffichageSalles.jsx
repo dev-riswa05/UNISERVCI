@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarDays, Clock3, DoorOpen, LogOut, Monitor, RefreshCw } from "lucide-react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CalendarDays, Clock3, DoorOpen, MapPin, RefreshCw } from "lucide-react";
 import { apiFetch } from "../lib/api";
-import { formatDate, formatTime } from "../lib/format";
-import { countdownLabel, meetingCountdown, meetingStatus, roomSchedule } from "../lib/display";
+import { formatTime } from "../lib/format";
+import { FERMETURE_MIN, OUVERTURE_MIN, countdownLabel, meetingCountdown, meetingStatus, roomSchedule, timeToMinutes } from "../lib/display";
 import BrandLogo from "../components/BrandLogo";
+import { homeForRole } from "../lib/session";
 
 const REFRESH_DELAY = 60_000;
 const ABIDJAN_TIME_ZONE = "Africa/Abidjan";
 
-// Force la date et l'heure ivoiriennes, quel que soit le fuseau de la tablette.
+// Force la date et l'heure ivoiriennes, quel que soit le fuseau de l'écran.
 function abidjanDateTime(date) {
   const parts = new Intl.DateTimeFormat("fr-FR", {
     timeZone: ABIDJAN_TIME_ZONE,
@@ -23,35 +23,38 @@ function abidjanDateTime(date) {
   };
 }
 
+// Page publique : aucune authentification, jamais de redirection vers la connexion.
 export default function AffichageSalles() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const selectedRoomId = searchParams.get("salle") || "";
   const [now, setNow] = useState(new Date());
   const [data, setData] = useState({ salles: [], reservations: [] });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [lastRefresh, setLastRefresh] = useState(null);
   const abidjanNow = useMemo(() => abidjanDateTime(now), [now]);
   const date = abidjanNow.date;
   const currentTime = abidjanNow.time;
+  const [hh, mm, ss] = currentTime.split(":");
+  const dateLongue = new Intl.DateTimeFormat("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: ABIDJAN_TIME_ZONE }).format(now);
+  const totalSalles = data.salles.length;
+  const sallesLibres = data.salles.filter((room) => !roomSchedule(room, data.reservations, currentTime).current).length;
 
   const loadDisplay = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
     else setLoading(true);
-    setError("");
-    const params = new URLSearchParams({ date });
-    if (selectedRoomId) params.set("id_salle", selectedRoomId);
     try {
-      const response = await apiFetch(`/affichage/?${params}`);
+      // Endpoint public : aucun en-tête Authorization n'est envoyé.
+      const response = await apiFetch(`/affichage/?${new URLSearchParams({ date })}`, { public: true });
       setData(response);
+      setError("");
+      setLastRefresh(new Date());
     } catch {
       setError("Impossible de charger les réservations. Une nouvelle tentative sera faite automatiquement.");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [date, selectedRoomId]);
+  }, [date]);
 
   // L'heure évolue sans recharger la page ; les badges changent donc de statut
   // dès qu'une réunion commence ou se termine.
@@ -60,99 +63,123 @@ export default function AffichageSalles() {
     return () => window.clearInterval(clock);
   }, []);
 
+  const loadRef = useRef(loadDisplay);
+  useEffect(() => { loadRef.current = loadDisplay; }, [loadDisplay]);
+
+  // Rechargement immédiat quand la date change.
   useEffect(() => {
     const initialLoad = window.setTimeout(() => loadDisplay(), 0);
-    const refresh = window.setInterval(() => loadDisplay(true), REFRESH_DELAY);
-    return () => {
-      window.clearTimeout(initialLoad);
-      window.clearInterval(refresh);
-    };
+    return () => window.clearTimeout(initialLoad);
   }, [loadDisplay]);
 
-  const selectedRoom = data.salles.find((room) => String(room.id_salle) === selectedRoomId);
-  const selectedSchedule = useMemo(
-    () => selectedRoom ? roomSchedule(selectedRoom, data.reservations, currentTime) : null,
-    [selectedRoom, data.reservations, currentTime]
-  );
-
-  const selectRoom = (event) => {
-    const value = event.target.value;
-    setSearchParams(value ? { salle: value } : {}, { replace: true });
-  };
-
-  const logout = () => {
-    sessionStorage.removeItem("token");
-    sessionStorage.removeItem("role");
-    sessionStorage.removeItem("username");
-    navigate("/login", { replace: true });
-  };
+  // L'intervalle de rafraîchissement n'est créé qu'une seule fois.
+  useEffect(() => {
+    const refresh = window.setInterval(() => loadRef.current(true), REFRESH_DELAY);
+    return () => window.clearInterval(refresh);
+  }, []);
 
   return (
-    <main className="display-shell min-h-screen text-slate-950">
-      <header className="display-header px-5 py-5 text-white sm:px-8 lg:px-12">
-        <div className="mx-auto flex max-w-[1700px] flex-col justify-between gap-5 md:flex-row md:items-center">
-          <div className="flex items-center gap-4">
-            <BrandLogo light />
-            <div className="border-l border-white/20 pl-4"><p className="text-sm font-bold uppercase tracking-[.2em] text-sky-100/70 sm:text-base">Salles de réunion</p><p className="text-xs text-sky-100/50">Disponibilités en temps réel</p></div>
+    <main className="display-shell min-h-screen overflow-x-clip text-slate-950">
+      <header className="display-header px-4 py-5 text-white sm:px-8 lg:px-12">
+        <div className="mx-auto flex max-w-[1900px] flex-col justify-between gap-5 md:flex-row md:items-center">
+          <div className="flex min-w-0 items-center gap-4">
+            <BrandLogo light to={sessionStorage.getItem("token") ? homeForRole(sessionStorage.getItem("role")) : "/"} nameClassName="text-xl sm:text-2xl 2xl:text-4xl" />
+            <div className="min-w-0 border-l-2 border-white/30 pl-4 sm:pl-6">
+              <p role="heading" aria-level={1} className="text-lg font-black uppercase leading-tight tracking-[.12em] text-white sm:text-3xl 2xl:text-5xl">Salles de réunion</p>
+              <p className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-semibold text-sky-100 sm:text-base 2xl:text-2xl">
+                <span className="inline-flex items-center gap-2"><span className="live-dot" aria-hidden="true" />En direct</span>
+                {totalSalles > 0 && <span className="text-sky-100/75">{sallesLibres} salle{sallesLibres > 1 ? "s" : ""} libre{sallesLibres > 1 ? "s" : ""} sur {totalSalles}</span>}
+              </p>
+            </div>
           </div>
-          <div className="flex items-end justify-between gap-7 md:justify-end">
-            <div className="text-left md:text-right"><p className="flex items-center gap-2 text-sm text-slate-400 md:justify-end"><CalendarDays size={16} />{formatDate(date, { weekday: "long" })}</p><p className="mt-1 flex items-center gap-2 text-3xl font-black tabular-nums md:justify-end"><Clock3 size={24} />{currentTime}</p><p className="mt-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Heure de Côte d’Ivoire</p></div>
-            <button aria-label="Déconnecter la tablette" title="Déconnecter la tablette" onClick={logout} className="rounded-xl border border-white/20 p-3 text-slate-300 hover:bg-white/10 hover:text-white"><LogOut size={22} /></button>
+          <div className="flex items-center gap-4 rounded-2xl border border-white/15 bg-white/[.06] px-4 py-3 sm:px-6 2xl:gap-6 2xl:px-9 2xl:py-5">
+            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-white/10 2xl:h-16 2xl:w-16"><Clock3 className="size-6 2xl:size-8" strokeWidth={1.8} /></span>
+            <div className="text-left md:text-right">
+              <p className="flex items-center gap-2 text-sm font-semibold capitalize text-sky-100 md:justify-end 2xl:text-2xl"><CalendarDays size={17} />{dateLongue}</p>
+              <p className="mt-1 flex items-baseline gap-1 text-4xl font-black leading-none tabular-nums sm:text-5xl md:justify-end 2xl:text-7xl" aria-label={`Il est ${hh} heures ${mm}`}>{hh}<span className="opacity-60">:</span>{mm}<span className="ml-1.5 text-xl font-bold text-(--uniserv-sky) sm:text-2xl 2xl:text-4xl">{ss}</span></p>
+              <p className="mt-1.5 text-[11px] font-semibold uppercase tracking-[.16em] text-sky-100/70 2xl:text-base">Heure d’Abidjan<span className="hidden xl:inline"> · Côte d’Ivoire</span></p>
+            </div>
           </div>
         </div>
       </header>
 
-      <div className="mx-auto max-w-[1700px] p-5 sm:p-8 lg:p-12">
-        <div className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-          <div><p className="mb-2 flex items-center gap-2 text-sm font-bold text-slate-500"><Monitor size={17} />Salle affichée</p><select aria-label="Choisir une salle" className="min-w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-lg font-bold shadow-sm outline-none focus:border-black sm:min-w-96" value={selectedRoomId} onChange={selectRoom}><option value="">Toutes les salles</option>{data.salles.map((room) => <option key={room.id_salle} value={room.id_salle}>{room.nom_salle}</option>)}</select></div>
-          <button className="flex items-center gap-2 self-start rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-bold hover:bg-slate-100 sm:self-auto" onClick={() => loadDisplay(true)} disabled={refreshing}><RefreshCw size={17} className={refreshing ? "animate-spin" : ""} />{refreshing ? "Actualisation…" : "Actualiser"}</button>
+      <div className="mx-auto max-w-[1900px] p-4 sm:p-8 lg:p-12">
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+          {sharedPlace(data.salles) ? <p className="flex min-w-0 items-start gap-2 text-sm text-slate-500 2xl:text-lg"><MapPin size={18} className="mt-0.5 shrink-0" />{sharedPlace(data.salles)}</p> : <span />}
+          <button className="flex min-h-11 items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-bold hover:bg-slate-100" onClick={() => loadDisplay(true)} disabled={refreshing}><RefreshCw size={17} className={refreshing ? "animate-spin" : ""} />{refreshing ? "Actualisation…" : "Actualiser"}</button>
         </div>
 
-        {error && <div role="alert" className="mb-7 rounded-2xl border border-slate-300 bg-white p-5 text-base font-semibold text-slate-700">{error}</div>}
-        {loading ? <DisplayLoading /> : selectedRoom && selectedSchedule ? (
-          <SelectedRoom room={selectedRoom} schedule={selectedSchedule} currentTime={currentTime} />
-        ) : selectedRoomId && !selectedRoom ? (
-          <EmptyDisplay message="Cette salle n’existe pas ou n’est plus active." />
-        ) : (
-          <AllRooms rooms={data.salles} reservations={data.reservations} currentTime={currentTime} onSelect={(id) => setSearchParams({ salle: String(id) })} />
-        )}
+        {error && <div role="alert" className="mb-7 rounded-2xl border border-slate-300 bg-white p-5 text-base font-semibold text-slate-700">{error}{lastRefresh && ` Dernière actualisation réussie à ${abidjanDateTime(lastRefresh).time.slice(0, 5).replace(":", "h")}.`}</div>}
+        {loading ? <DisplayLoading /> : <AllRooms rooms={data.salles} reservations={data.reservations} currentTime={currentTime} />}
       </div>
     </main>
   );
 }
 
-function AllRooms({ rooms, reservations, currentTime, onSelect }) {
+// Adresse commune à toutes les salles : affichée une seule fois en haut de page.
+function sharedPlace(rooms) {
+  const places = [...new Set(rooms.map((room) => room.localisation).filter(Boolean))];
+  return places.length === 1 && rooms.every((room) => room.localisation) ? places[0] : "";
+}
+
+// Toutes les salles du jour en même temps, sans filtre d'étage. Les colonnes
+// s'adaptent au nombre de salles : les cartes remplissent toute la largeur.
+function AllRooms({ rooms, reservations, currentTime }) {
   if (!rooms.length) return <EmptyDisplay message="Aucune salle n’est disponible à l’affichage." />;
-  return <section className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">{rooms.map((room) => { const schedule = roomSchedule(room, reservations, currentTime); return <RoomCard key={room.id_salle} room={room} schedule={schedule} onSelect={onSelect} />; })}</section>;
+  const placeShared = Boolean(sharedPlace(rooms));
+  return <section className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-5 lg:gap-6">{rooms.map((room) => <RoomCard key={room.id_salle} room={room} showPlace={!placeShared} schedule={roomSchedule(room, reservations, currentTime)} />)}</section>;
 }
 
-function RoomCard({ room, schedule, onSelect }) {
+function RoomCard({ room, schedule, showPlace }) {
   const occupied = Boolean(schedule.current);
-  return <button onClick={() => onSelect(room.id_salle)} className="overflow-hidden rounded-3xl border border-slate-200 bg-white text-left shadow-[0_15px_50px_rgba(15,23,42,.08)] transition hover:-translate-y-1 hover:shadow-xl"><div className={`flex items-center justify-between px-6 py-5 text-white ${occupied ? "bg-[#e13236]" : "bg-black"}`}><DoorOpen size={28} strokeWidth={1.7} /><span className="rounded-full border border-white/25 bg-white/10 px-4 py-1.5 text-sm font-black tracking-wider">{occupied ? "OCCUPÉE" : "LIBRE"}</span></div><div className="p-6"><h2 className="min-h-14 text-2xl font-black leading-tight">{room.nom_salle}</h2>{occupied ? <MeetingHighlight label="En cours" meeting={schedule.current} currentTime={schedule.currentTime} /> : <p className="mt-5 text-lg font-black tabular-nums">{countdownLabel(schedule)}</p>}<div className="mt-6 border-t border-slate-200 pt-5"><p className="text-sm font-bold uppercase tracking-wider text-slate-400">Prochaine réunion</p>{schedule.next ? <><p className="mt-2 text-xl font-black tabular-nums">{meetingCountdown(schedule.next, schedule.currentTime)}</p><p className="mt-1 text-xs text-slate-400">{formatTime(schedule.next.heure_debut)} – {formatTime(schedule.next.heure_fin)}</p><p className="mt-1 truncate text-base text-slate-600">{schedule.next.objet}</p></> : <p className="mt-2 text-base text-slate-500">Aucune autre réservation aujourd’hui</p>}</div></div></button>;
+  return <article className="flex min-w-0 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_15px_50px_rgba(15,23,42,.08)]">
+    <div className={`flex items-center justify-between gap-3 px-5 py-4 text-white sm:px-6 sm:py-5 ${occupied ? "bg-[#e13236]" : "bg-black"}`}><DoorOpen size={28} strokeWidth={1.7} /><span className="rounded-full border border-white/25 bg-white/10 px-4 py-1.5 text-sm font-black tracking-wider 2xl:text-base">{occupied ? "OCCUPÉE" : "LIBRE"}</span></div>
+    <div className="flex flex-1 flex-col p-5 sm:p-6">
+      <h2 className="text-balance wrap-break-word text-2xl font-black leading-tight 2xl:text-3xl">{room.nom_salle}</h2>
+      {room.etage && <span className="mt-2 inline-flex w-fit rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase tracking-wider text-slate-600 2xl:text-sm">{room.etage}</span>}
+      {showPlace && room.localisation && <p className="mt-2 text-sm text-slate-500 2xl:text-base">{room.localisation}</p>}
+      <p className="mt-5 text-lg font-black tabular-nums 2xl:text-xl">{countdownLabel(schedule)}</p>
+      <DayBar meetings={schedule.meetings} currentTime={schedule.currentTime} />
+      {schedule.meetings.length > 0 && <div className="mt-5 border-t border-slate-200 pt-4">
+        <p className="text-sm font-bold uppercase tracking-wider text-slate-400">Réservations du jour</p>
+        <ul className="mt-3 space-y-3">{schedule.meetings.map((meeting) => <Slot key={meeting.id_reservation} meeting={meeting} currentTime={schedule.currentTime} />)}</ul>
+      </div>}
+    </div>
+  </article>;
 }
 
-function SelectedRoom({ room, schedule, currentTime }) {
-  const occupied = Boolean(schedule.current);
-  return <div className="space-y-7"><section className={`rounded-3xl p-7 text-white shadow-xl sm:p-10 ${occupied ? "bg-[#e13236]" : "bg-black"}`}><div className="flex flex-col justify-between gap-6 md:flex-row md:items-center"><div><p className="mb-3 text-sm font-bold uppercase tracking-[.2em] text-white/70">Salle sélectionnée</p><h1 className="text-3xl font-black sm:text-5xl">{room.nom_salle}</h1></div><span className="w-fit rounded-full border border-white/25 bg-white/10 px-6 py-3 text-2xl font-black tracking-wider">{occupied ? "OCCUPÉE" : "LIBRE"}</span></div><p className="mt-7 text-3xl font-black tabular-nums">{countdownLabel(schedule)}</p>{occupied && <div className="mt-6 border-t border-white/20 pt-6"><p className="text-sm font-bold uppercase tracking-wider text-white/70">Réunion en cours</p><p className="mt-2 text-3xl font-black">{schedule.current.objet}</p><p className="mt-2 text-sm text-white/70">{formatTime(schedule.current.heure_debut)} – {formatTime(schedule.current.heure_fin)}</p></div>}</section><section className="grid gap-6 lg:grid-cols-[.8fr_1.2fr]"><div className="rounded-3xl border border-slate-200 bg-white p-7 shadow-sm"><p className="text-sm font-bold uppercase tracking-wider text-slate-400">Prochaine réunion</p>{schedule.next ? <><p className="mt-3 text-3xl font-black tabular-nums">{meetingCountdown(schedule.next, currentTime)}</p><p className="mt-2 text-sm text-slate-400">{formatTime(schedule.next.heure_debut)} – {formatTime(schedule.next.heure_fin)}</p><p className="mt-3 text-xl text-slate-600">{schedule.next.objet}</p></> : <p className="mt-5 text-xl text-slate-500">Aucune autre réservation aujourd’hui</p>}</div><TodayList meetings={schedule.meetings} currentTime={currentTime} /></section></div>;
+// Repères horaires de la frise, placés à leur position exacte.
+const DAY_TICKS = [[480, "8h"], [600, "10h"], [720, "12h"], [840, "14h"], [960, "16h"], [1050, "17h30"]];
+
+// Frise de la journée (08h – 17h30) : créneaux occupés et heure actuelle.
+function DayBar({ meetings, currentTime }) {
+  const span = FERMETURE_MIN - OUVERTURE_MIN;
+  const percent = (value) => Math.min(100, Math.max(0, ((timeToMinutes(value) - OUVERTURE_MIN) / span) * 100));
+  const now = timeToMinutes(currentTime);
+  const nowVisible = now >= OUVERTURE_MIN && now <= FERMETURE_MIN;
+  return <div className="mt-4" role="img" aria-label="Occupation de la salle sur la journée">
+    <div className="relative h-3.5 rounded-full bg-slate-100">
+      {meetings.map((meeting) => <span key={meeting.id_reservation} className={`absolute inset-y-0 rounded-full ${meetingStatus(meeting, currentTime) === "En cours" ? "bg-[#e13236]" : "bg-[#00263e]"}`} style={{ left: `${percent(meeting.heure_debut)}%`, width: `${Math.max(1.5, percent(meeting.heure_fin) - percent(meeting.heure_debut))}%` }} />)}
+      {nowVisible && <span className="absolute -inset-y-1 w-0.5 rounded bg-[#e13236]" style={{ left: `${percent(currentTime)}%` }} />}
+    </div>
+    <div className="relative mt-1.5 h-5 text-xs font-semibold tabular-nums text-slate-400 2xl:text-sm">{DAY_TICKS.map(([minutes, label], index) => <span key={label} className="absolute whitespace-nowrap" style={{ left: `${((minutes - OUVERTURE_MIN) / span) * 100}%`, transform: index === 0 ? "none" : index === DAY_TICKS.length - 1 ? "translateX(-100%)" : "translateX(-50%)" }}>{label}</span>)}</div>
+  </div>;
 }
 
-function TodayList({ meetings, currentTime }) {
-  return <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-200 px-6 py-5"><h2 className="text-xl font-black">Réservations du jour</h2></div>{meetings.length ? <div className="divide-y divide-slate-100">{meetings.map((meeting) => { const status = meetingStatus(meeting, currentTime); return <div key={meeting.id_reservation} className="grid gap-3 px-6 py-5 sm:grid-cols-[220px_1fr_auto] sm:items-center"><div><p className="text-lg font-black tabular-nums">{meetingCountdown(meeting, currentTime)}</p><p className="text-xs text-slate-400">{formatTime(meeting.heure_debut)} – {formatTime(meeting.heure_fin)}</p></div><p className="text-lg font-semibold">{meeting.objet}</p><StatusBadge status={status} /></div>; })}</div> : <EmptyDisplay message="Aucune réservation aujourd’hui." compact />}</section>;
-}
-
-function StatusBadge({ status }) {
+function Slot({ meeting, currentTime }) {
+  const status = meetingStatus(meeting, currentTime);
   const classes = status === "En cours" ? "bg-[#e13236] text-white" : status === "Terminée" ? "bg-slate-200 text-slate-500" : "bg-black text-white";
-  return <span className={`w-fit rounded-full px-3 py-1.5 text-xs font-black uppercase tracking-wide ${classes}`}>{status}</span>;
-}
-
-function MeetingHighlight({ label, meeting, currentTime }) {
-  return <div className="mt-5"><p className="text-sm font-bold uppercase tracking-wider text-slate-400">{label}</p><p className="mt-2 text-xl font-black tabular-nums">{meetingCountdown(meeting, currentTime)}</p><p className="mt-1 text-xs text-slate-400">{formatTime(meeting.heure_debut)} – {formatTime(meeting.heure_fin)}</p><p className="mt-1 truncate text-base text-slate-600">{meeting.objet}</p></div>;
+  return <li className={`rounded-2xl border border-slate-200 p-3 ${status === "Terminée" ? "opacity-60" : ""}`}>
+    <div className="flex items-center justify-between gap-3"><p className="text-lg font-black tabular-nums 2xl:text-xl">{formatTime(meeting.heure_debut)} – {formatTime(meeting.heure_fin)}</p><span className={`shrink-0 rounded-full px-3 py-1 text-xs font-black uppercase tracking-wide ${classes}`}>{status}</span></div>
+    <p className="mt-1 wrap-break-word text-base text-slate-600 2xl:text-lg">{meeting.objet}</p>
+    {status === "En cours" && <p className="mt-1 text-sm font-semibold tabular-nums text-slate-500">{meetingCountdown(meeting, currentTime)}</p>}
+  </li>;
 }
 
 function DisplayLoading() {
   return <div className="grid min-h-80 place-items-center rounded-3xl border border-slate-200 bg-white"><div className="text-center"><span className="spinner mx-auto mb-4 block" /><p className="text-lg font-bold text-slate-600">Chargement des salles…</p></div></div>;
 }
 
-function EmptyDisplay({ message, compact = false }) {
-  return <div className={`grid place-items-center text-center text-slate-500 ${compact ? "min-h-40" : "min-h-80 rounded-3xl border border-slate-200 bg-white"}`}><div><DoorOpen className="mx-auto mb-3" size={32} strokeWidth={1.5} /><p className="text-lg font-semibold">{message}</p></div></div>;
+function EmptyDisplay({ message }) {
+  return <div className="grid min-h-80 place-items-center rounded-3xl border border-slate-200 bg-white text-center text-slate-500"><div><DoorOpen className="mx-auto mb-3" size={32} strokeWidth={1.5} /><p className="text-lg font-semibold">{message}</p></div></div>;
 }

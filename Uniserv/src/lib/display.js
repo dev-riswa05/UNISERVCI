@@ -22,7 +22,11 @@ export function roomSchedule(room, reservations, currentTime) {
 
 export function countdownLabel(schedule) {
   const target = schedule.current?.heure_fin || schedule.next?.heure_debut;
-  if (!target) return "Aucune autre réservation aujourd’hui";
+  if (!target) {
+    return schedule.meetings.length
+      ? "Aucune autre réservation aujourd’hui"
+      : "Libre toute la journée";
+  }
   const seconds = (value) => { const [h, m, s = 0] = value.slice(0, 8).split(":").map(Number); return h * 3600 + m * 60 + s; };
   const remaining = Math.max(0, seconds(target) - seconds(schedule.currentTime));
   const hours = Math.floor(remaining / 3600);
@@ -52,4 +56,13 @@ export function meetingCountdown(meeting, currentTime) {
   if (now < start) return `Commence dans ${durationLabel(start - now)}`;
   if (now < end) return `Se termine dans ${durationLabel(end - now)}`;
   return `Terminée depuis ${durationLabel(now - end)}`;
+}
+
+// Horaires d'ouverture des salles (identiques à ceux de l'API).
+export const OUVERTURE_MIN = 8 * 60;
+export const FERMETURE_MIN = 17 * 60 + 30;
+
+export function timeToMinutes(value) {
+  const [hours, minutes] = value.slice(0, 5).split(":").map(Number);
+  return hours * 60 + minutes;
 }

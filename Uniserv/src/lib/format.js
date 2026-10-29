@@ -1,4 +1,4 @@
-export const todayISO = () => new Date().toLocaleDateString("en-CA");
+export const todayISO = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Abidjan" }).format(new Date());
 export const formatDate = (value, options = {}) => value ? new Intl.DateTimeFormat("fr-FR", { day: "2-digit", month: "short", year: "numeric", ...options }).format(new Date(`${value}T12:00:00`)) : "—";
 export const formatTime = (value) => value ? value.slice(0, 5).replace(":", "h") : "—";
 export const statusLabel = (status) => ({ CONFIRMEE: "Confirmée", ANNULEE: "Annulée", EN_ATTENTE: "En attente" }[status] || status || "Confirmée");

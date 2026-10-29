@@ -8,39 +8,12 @@ les réservations de salles.
 Prérequis : Node.js, le backend Django et MySQL/WampServer démarrés.
 
 ```powershell
-cd C:\Users\Hp\Desktop\Uniservci\Uniserv
+cd <chemin-du-projet>/Uniserv
 npm install
 npm run dev
 ```
 
 L'interface est ensuite accessible sur <http://localhost:5173>.
-
-## Test depuis le même réseau Wi-Fi
-
-L'adresse Wi-Fi actuelle de cet ordinateur est `10.0.0.99`.
-
-Lancer Django en écoutant sur le réseau :
-
-```powershell
-cd C:\Users\Hp\Desktop\Uniservci\backend
-.\.venv\Scripts\Activate.ps1
-python manage.py runserver 0.0.0.0:8000
-```
-
-Dans un second terminal, lancer le frontend :
-
-```powershell
-cd C:\Users\Hp\Desktop\Uniservci\Uniserv
-npm run dev
-```
-
-Les autres personnes connectées au même réseau peuvent ensuite ouvrir :
-
-<http://10.0.0.99:5173>
-
-Si l'adresse IP de l'ordinateur change, remplacer `10.0.0.99` dans
-`backend/.env`. Il peut aussi être nécessaire d'autoriser les ports `5173` et
-`8000` dans le pare-feu Windows lors de la première connexion.
 
 ## Architecture importante
 
@@ -54,6 +27,21 @@ Si l'adresse IP de l'ordinateur change, remplacer `10.0.0.99` dans
 Copier `.env.example` vers `.env` seulement si l'URL de l'API doit changer.
 Les variables commençant par `VITE_` sont intégrées au build frontend et ne
 doivent donc jamais contenir de mot de passe ou de secret.
+
+### Production
+
+`VITE_API_URL` est **obligatoire** pour un build de production (par exemple
+`https://api.exemple.com/api`). Sans elle, les appels à l'API échouent avec une
+erreur de configuration ; le repli automatique sur le port 8000 n'existe qu'en
+développement.
+
+## Rôles et écran d'affichage
+
+- **Super Admin** : gestion complète, y compris l'administration des comptes.
+- **RH** : gestion des salles et des réservations.
+- **Affichage** : compte dédié aux tablettes, limité à la route `/affichage`
+  (disponibilités en temps réel, actualisation toutes les minutes, heure de
+  Côte d'Ivoire). Un compte Affichage n'accède pas au reste de l'application.
 
 ## Vérifications
 

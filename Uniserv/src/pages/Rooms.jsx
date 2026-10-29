@@ -75,11 +75,11 @@ export default function Rooms() {
           <label className="label" htmlFor="room-end"><Clock3 size={15} className="mr-1 inline" />Heure de fin</label>
           <select id="room-end" className="field" required disabled={!slot.start} value={slot.end} onChange={(event) => updateSlot("end", event.target.value)}><option value="">Choisir</option>{TIME_OPTIONS.filter((time) => time > slot.start).map((time) => <option key={time} value={time}>{formatTimeOption(time)}</option>)}</select>
         </div>
-        <button className="btn-primary" disabled={checking}>{checking ? "Vérification…" : "Vérifier"}</button>
+        <button className="btn-primary sm:col-span-2 lg:col-span-1" disabled={checking}>{checking ? "Vérification…" : "Vérifier"}</button>
       </form>
 
       {loading ? <Loading /> : !rooms.length ? <div className="card"><Empty>Aucune salle enregistrée.</Empty></div> : (
-        <section className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+        <section className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
           {rooms.map((room) => {
             const isAvailable = availableIds?.has(room.id_salle);
             const wasChecked = availableIds !== null;
@@ -90,7 +90,7 @@ export default function Rooms() {
                   {wasChecked && <span className={`rounded-full border px-3 py-1 text-xs font-bold ${isAvailable ? "border-white bg-white text-black" : "border-white/20 bg-white/10 text-slate-300"}`}>{isAvailable ? "Disponible" : "Occupée"}</span>}
                 </div>
                 <div className="p-5">
-                  <h2 className="font-black text-slate-900">{room.nom_salle}</h2>
+                  <h2 className="wrap-break-word font-black text-slate-900">{room.nom_salle}</h2>
                   <div className="mt-4 space-y-2.5 text-sm text-slate-500">
                     <p className="flex items-start gap-2"><MapPin size={17} className="mt-0.5 shrink-0 text-black" strokeWidth={1.8} />{room.localisation || "Localisation non renseignée"}</p>
                     <p className="flex items-center gap-2"><Building2 size={17} className="text-black" strokeWidth={1.8} />{room.etage || "Étage non renseigné"}</p>
